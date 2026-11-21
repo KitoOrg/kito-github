@@ -1,11 +1,13 @@
 name = "github"
-version = "0.1.0"
-description = "Sign in to a Kito server with GitHub"
+version = "0.2.0"
+description = "GitHub for Kito: sign in to a server, and issues as the tasks of lanes"
 api = 1
-# It says who somebody is (`sign_in`), and adds `kito-server github`, with
-# which an administrator says which OAuth app is the server's
-# (`server_admin`). It is given nothing of any repository.
-permissions = ["sign_in", "server_admin"]
+# On a server it says who somebody is (`sign_in`), and adds `kito-server
+# github`, with which an administrator says which OAuth app is the
+# server's (`server_admin`). In a repository it reads what a lane is for
+# (`read`), to tell the issue the lane's task names; it changes nothing of
+# the repository.
+permissions = ["read", "sign_in", "server_admin"]
 
 [sign_in]
 method = "github"
@@ -14,3 +16,22 @@ about = "Sign in with GitHub"
 [[server_command]]
 name = "github"
 about = "Set up signing in with GitHub: setup <client id> | status"
+
+[[command]]
+name = "github"
+about = "Issues at GitHub as the tasks of lanes: link <owner>/<repository> | token --from <file> | status | issues | issue <number>"
+
+# A lane whose task is an issue: the issue is told when the lane is opened,
+# and told and closed when it is integrated.
+[[event]]
+kinds = ["lane_opened", "integrated"]
+
+[[tool]]
+name = "issues"
+description = "The open issues of this project at GitHub: what is asked for and not done yet. Each comes with the `task` to open a lane with."
+input = { type = "object", properties = {} }
+
+[[tool]]
+name = "issue"
+description = "One issue at GitHub, with what was said on it. Read it before working on it, and open your lane with `task` set to the task it gives: the issue is then told, and closed when your lane is integrated."
+input = { type = "object", properties = { number = { type = "integer", description = "The number of the issue, as `issues` lists it" } }, required = ["number"] }

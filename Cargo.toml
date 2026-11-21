@@ -1,7 +1,7 @@
 [package]
 name = "kito-github"
-description = "Signing in to a Kito server with GitHub: a plugin that says who somebody is"
-version = "0.1.0"
+description = "GitHub for Kito: signing in to a server, and issues as the tasks of lanes"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"

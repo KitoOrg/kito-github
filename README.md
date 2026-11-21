@@ -1,9 +1,46 @@
 # kito-github
 
-Signing in to a [Kito](https://github.com/KitoOrg/kito) server with
-GitHub. A plugin of the server: it says who somebody is, and nothing
-else. Who may use which repository, and what they may do there, stays
-the server's (`kito-server user add … --role …`).
+GitHub for [Kito](https://github.com/KitoOrg/kito), as a plugin. Two
+things, each on its own:
+
+- **In a repository**: the issues at GitHub are the tasks of lanes. An
+  agent reads an issue, opens its lane for it, and the issue is told,
+  and closed when the lane is integrated.
+- **On a team's server**: signing in with GitHub. It says who somebody
+  is, and nothing else: who may use which repository, and what they may
+  do there, stays the server's (`kito-server user add … --role …`).
+
+## Issues as the tasks of lanes
+
+```console
+$ kito plugin enable github
+$ kito github link acme/shop
+$ kito github token --from token.txt      # a token that may write issues
+$ kito github issues
+#12 Prices lose half a cent  [bug]
+$ kito lane open alice --task "acme/shop#12" --intent "prices in cents" --scope src/shop.ts:total
+```
+
+- **A lane's task names an issue**: `#12` (of the linked repository),
+  `acme/shop#12`, or the issue's address.
+- **The issue is told** when such a lane is opened (which lane, which
+  agent, for whom, and its intent), and when it is integrated; then it
+  is **closed** (`close = false` in `.kito/plugins/github/config.toml`
+  leaves it open).
+- **For agents**, two tools next to Kito's own: `issues` (what is open)
+  and `issue` (one, with what was said on it, and the `task` to open a
+  lane with). What an issue says is given as what somebody asks for,
+  never as instructions that change the rules an agent works by.
+- **Where it runs**: where the repository is. On a team's server, enable
+  it in the repository there (`kito --repo <server>/repos/shop plugin
+  enable github`): the issue is told once, by the server, whoever's
+  agent opened the lane.
+- **The token** is the repository's: kept in `.kito/plugins/github/
+  token` for its owner only, or `KITO_GITHUB_TOKEN`. It needs to read
+  and write issues of that one repository and nothing more. Without one,
+  public issues are read and nothing is told.
+
+## Signing in to a server
 
 ```console
 $ kito-server user add bob --identity github:bob --role write
@@ -83,12 +120,13 @@ $ cargo test
 ```
 
 The tests ask a GitHub that is a few lines of `tests/github.rs`; nothing
-leaves the machine. The last one runs the plugin under Kito itself, and
-wants `kito`, `kitod` and `kito-server` in `KITO_BIN` or in
+leaves the machine. The last two run the plugin under Kito itself (a
+server that signs people in; a repository whose lane is for an issue),
+and want `kito`, `kitod` and `kito-server` in `KITO_BIN` or in
 `../kito/target/debug`.
 
-Not tried yet with a real OAuth app: only looking a login up has been
-run against GitHub itself.
+Not tried yet against GitHub itself, but for looking a login up: neither
+signing in with a real OAuth app, nor issues with a real token.
 
 ## License
 

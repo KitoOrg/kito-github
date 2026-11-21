@@ -1,4 +1,6 @@
-//! Signing in to a Kito server with GitHub: a plugin (ADR 0006 of Kito).
+//! GitHub for Kito: a plugin. On a server, it signs people in (ADR 0006
+//! of Kito), which is this file. In a repository, the issues at GitHub are
+//! the tasks of lanes: `issues.rs`.
 //!
 //! It says who somebody is, and nothing else. The server runs it once
 //! for each step, with JSON on its input, and reads the last line it
@@ -17,6 +19,8 @@
 //! `plugins/github/config.toml` under the server's directory, which
 //! `kito-server github setup` writes. The token GitHub gives it is used
 //! once, to ask who it is for, and kept nowhere.
+
+mod issues;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -114,7 +118,7 @@ impl Config {
     }
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     // The server waits a minute for a step: answer well within it.
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
@@ -125,7 +129,9 @@ fn agent() -> ureq::Agent {
 
 /// What GitHub answered, as JSON, whatever the status: its errors are
 /// JSON too. `Err` is for a GitHub that could not be asked.
-fn answer_of(asked: Result<ureq::Response, ureq::Error>) -> Result<(u16, Value), String> {
+pub(crate) fn answer_of(
+    asked: Result<ureq::Response, ureq::Error>,
+) -> Result<(u16, Value), String> {
     let response = match asked {
         Ok(response) => response,
         Err(ureq::Error::Status(_, response)) => response,
@@ -437,12 +443,23 @@ fn main() -> ExitCode {
         }
         // As a command of the server, it is given its own name first.
         ["github", ..] => admin(&args[1..]),
+        // In a repository: run for what happens there, asked by agents,
+        // and `kito github …` for a person (a repository's command is not
+        // given its name).
+        ["event"] => issues::event(),
+        ["tool", name] => {
+            println!("{}", issues::tool(name));
+            Ok(())
+        }
+        rest if std::env::var_os("KITO_REPO").is_some() && rest.first() != Some(&"--version") => {
+            issues::command(rest)
+        }
         ["--version"] => {
             println!("kito-github {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        _ => Err("this is a plugin of a Kito server: `kito-server plugin add --path <dir>`, then `kito-server \
-                  plugin enable github`"
+        _ => Err("this is a plugin of Kito. On a server: `kito-server plugin enable github`, to sign people in. \
+                  In a repository: `kito plugin enable github`, then `kito github link <owner>/<repository>`"
             .to_owned()),
     };
     match done {
