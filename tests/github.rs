@@ -551,8 +551,8 @@ fn a_kito_server_signs_people_in_with_it() {
         "bob",
         "--identity",
         "github:bob",
-        "--role",
-        "write",
+        "--repo",
+        "shop:write",
     ]);
     assert!(
         added.contains("whoever signs in as github:bob is bob. No token."),
