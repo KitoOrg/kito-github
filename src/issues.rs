@@ -229,10 +229,14 @@ fn one_issue(linked: &Linked, number: u64) -> Result<Value, String> {
     if issue["comments"].as_u64().unwrap_or(0) > 0 {
         if let Ok((200, found)) = github("GET", &format!("{url}/comments?per_page=5"), None) {
             for comment in found.as_array().into_iter().flatten() {
-                comments.push(json!({
+                let mut said = json!({
                     "by": comment["user"]["login"],
                     "said": cut(comment["body"].as_str().unwrap_or_default()),
-                }));
+                });
+                if let Some(id) = comment["id"].as_u64() {
+                    said["id"] = json!(id);
+                }
+                comments.push(said);
             }
         }
     }
@@ -240,6 +244,7 @@ fn one_issue(linked: &Linked, number: u64) -> Result<Value, String> {
         "number": number,
         "title": issue["title"],
         "state": issue["state"],
+        "state_reason": issue["state_reason"],
         "by": issue["user"]["login"],
         "labels": labels(&issue),
         "url": issue["html_url"],
@@ -298,6 +303,9 @@ fn daemon(method: &str, params: Value) -> Result<Value, String> {
 pub fn event() -> Result<(), String> {
     let event: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(Value::Null);
     let kind = event["kind"].as_str().unwrap_or_default();
+    if kind.starts_with("task_") {
+        return task_event(kind, &event);
+    }
     let (Some(lane), true) = (
         event["lane"].as_str(),
         matches!(kind, "lane_opened" | "integrated"),
@@ -311,7 +319,7 @@ pub fn event() -> Result<(), String> {
     let linked = Linked::load()?;
     let Some((repo, number)) = info["task"]
         .as_str()
-        .and_then(|task| issue_of(task, &linked.repo))
+        .and_then(|task| issue_of_lane(task, &linked.repo))
     else {
         return Ok(());
     };
@@ -363,6 +371,212 @@ pub fn event() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------- Kito's tasks
+
+/// The number of the task an event is about: `task#3` in what it says.
+fn task_in(text: &str) -> Option<u64> {
+    let at = text.find("task#")?;
+    let digits: String = text[at + 5..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// The issue a task of Kito came from (Kito 0.33), as this plugin made it.
+fn issue_of_task(task: &Value) -> Option<(String, u64)> {
+    let source = &task["source"];
+    (source["kind"] == "github").then_some(())?;
+    Some((
+        source["repo"].as_str()?.to_owned(),
+        source["number"].as_u64()?,
+    ))
+}
+
+/// The issue a lane's task names: a task of Kito made of an issue, or an
+/// issue named as before.
+fn issue_of_lane(task: &str, linked: &str) -> Option<(String, u64)> {
+    if task.trim().starts_with("task#") {
+        let found = daemon("task", json!({ "task": task.trim() })).ok()?;
+        return issue_of_task(&found);
+    }
+    issue_of(task, linked)
+}
+
+/// A task of Kito made of an issue was commented on, closed, dropped or
+/// reopened: the issue is told the same.
+fn task_event(kind: &str, event: &Value) -> Result<(), String> {
+    let Some(n) = event["what"].as_str().and_then(task_in) else {
+        return Ok(());
+    };
+    let Ok(task) = daemon("task", json!({ "task": format!("task#{n}") })) else {
+        return Ok(());
+    };
+    let Some((repo, number)) = issue_of_task(&task) else {
+        return Ok(());
+    };
+    if token().is_none() {
+        return Err(format!(
+            "task#{n} is {repo}#{number}, and this repository has no token to say so at GitHub: `kito github token \
+             --from <file>`"
+        ));
+    }
+    let linked = Linked::load()?;
+    let issue = format!("{}/repos/{repo}/issues/{number}", linked.api());
+    let patch = |body: Value, what: &str| -> Result<(), String> {
+        let (status, answer) = github("PATCH", &issue, Some(&body))?;
+        match (200..300).contains(&status) {
+            true => Ok(()),
+            false => Err(refused(status, &answer, &format!("{what} {repo}#{number}"))),
+        }
+    };
+    match kind {
+        "task_comment" => {
+            // What was said here, not what came from GitHub.
+            let Some(said) = task["comments"].as_array().and_then(|all| all.last()) else {
+                return Ok(());
+            };
+            if !said["source"].is_null() {
+                return Ok(());
+            }
+            let body = format!(
+                "**Kito**: {} said on task#{n}:\n\n{}",
+                said["by"].as_str().unwrap_or("somebody"),
+                said["text"].as_str().unwrap_or_default()
+            );
+            let (status, answer) = github(
+                "POST",
+                &format!("{issue}/comments"),
+                Some(&json!({ "body": body })),
+            )?;
+            if !(200..300).contains(&status) {
+                return Err(refused(
+                    status,
+                    &answer,
+                    &format!("a comment on {repo}#{number}"),
+                ));
+            }
+            Ok(())
+        }
+        "task_done" if linked.close != Some(false) => patch(
+            json!({ "state": "closed", "state_reason": "completed" }),
+            "closing",
+        ),
+        "task_changed" => match task["state"].as_str() {
+            Some("dropped") => patch(
+                json!({ "state": "closed", "state_reason": "not_planned" }),
+                "closing",
+            ),
+            Some("open" | "in_lane" | "ready") => {
+                let (status, now) = github("GET", &issue, None)?;
+                match status == 200 && now["state"] == "closed" {
+                    true => patch(json!({ "state": "open" }), "reopening"),
+                    false => Ok(()),
+                }
+            }
+            _ => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// `kito github sync`: each open issue is a task of Kito, with what was
+/// said on it; a task whose issue was closed at GitHub is closed or
+/// dropped as it was. Answers what it did.
+fn sync(linked: &Linked) -> Result<Vec<String>, String> {
+    let repo = linked.repo()?.to_owned();
+    let tasks = daemon("tasks", json!({ "state": "all" }))?;
+    let mut of_issue: std::collections::BTreeMap<u64, Value> = tasks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|task| {
+            let (from, number) = issue_of_task(task)?;
+            (from == repo).then(|| (number, task.clone()))
+        })
+        .collect();
+    let mut said = Vec::new();
+    for listed in open_issues(linked)? {
+        let Some(number) = listed["number"].as_u64() else {
+            continue;
+        };
+        let issue = one_issue(linked, number)?;
+        let task = match of_issue.remove(&number) {
+            Some(task) => task,
+            None => {
+                let url = issue["url"].as_str().unwrap_or_default();
+                let text = format!("{}\n\n{url}", issue["text"].as_str().unwrap_or_default());
+                let made = daemon(
+                    "task_add",
+                    json!({
+                        "title": issue["title"],
+                        "text": text.trim(),
+                        "source": { "kind": "github", "repo": repo, "number": number, "url": url },
+                    }),
+                )?;
+                said.push(format!(
+                    "{} is {repo}#{number}: {}",
+                    made["id"].as_str().unwrap_or("?"),
+                    issue["title"].as_str().unwrap_or_default()
+                ));
+                made
+            }
+        };
+        let id = task["id"].as_str().unwrap_or_default().to_owned();
+        let whole = daemon("task", json!({ "task": id }))?;
+        let known: std::collections::BTreeSet<String> = whole["comments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|comment| comment["source"]["comment"].as_str().map(str::to_owned))
+            .collect();
+        for comment in issue["comments"].as_array().into_iter().flatten() {
+            let text = comment["said"].as_str().unwrap_or_default();
+            // What Kito itself said there came from here.
+            if text.starts_with("**Kito**") {
+                continue;
+            }
+            let by = comment["by"].as_str().unwrap_or("somebody");
+            let key = match comment["id"].as_u64() {
+                Some(id) => id.to_string(),
+                None => format!("{by}:{text}"),
+            };
+            if known.contains(&key) {
+                continue;
+            }
+            daemon(
+                "task_comment",
+                json!({
+                    "task": id,
+                    "text": format!("**{by}** at GitHub: {text}"),
+                    "source": { "kind": "github", "comment": key },
+                }),
+            )?;
+            said.push(format!("{id}: what {by} said at GitHub"));
+        }
+    }
+    // Issues no longer open: their tasks follow, once.
+    for (number, task) in of_issue {
+        if matches!(task["state"].as_str(), Some("done" | "dropped")) {
+            continue;
+        }
+        let issue = one_issue(linked, number)?;
+        if issue["state"] != "closed" {
+            continue;
+        }
+        let id = task["id"].as_str().unwrap_or_default();
+        let (method, what) = match issue["state_reason"].as_str() {
+            Some("not_planned") => ("task_drop", "dropped"),
+            _ => ("task_done", "done"),
+        };
+        daemon(method, json!({ "task": id }))?;
+        said.push(format!(
+            "{id} is {what}: {repo}#{number} was closed at GitHub"
+        ));
+    }
+    Ok(said)
 }
 
 // ---------------------------------------------------------------- tools
@@ -448,6 +662,14 @@ pub fn command(args: &[&str]) -> Result<(), String> {
             }
             Ok(())
         }
+        ["sync"] => {
+            let said = sync(&linked)?;
+            if said.is_empty() {
+                println!("The tasks are as the issues of {} are: nothing to bring.", linked.repo);
+            }
+            said.iter().for_each(|line| println!("{line}"));
+            Ok(())
+        }
         ["issues"] => {
             let issues = open_issues(&linked)?;
             if issues.is_empty() {
@@ -470,7 +692,7 @@ pub fn command(args: &[&str]) -> Result<(), String> {
             println!("\nA lane for it: `kito lane open <agent> --task \"{}\" --intent … --scope …`", text("task"));
             Ok(())
         }
-        _ => Err("it is `kito github link <owner>/<repository>`, `token --from <file>`, `status`, `issues` or `issue <number>`".to_owned()),
+        _ => Err("it is `kito github link <owner>/<repository>`, `token --from <file>`, `status`, `sync`, `issues` or `issue <number>`".to_owned()),
     }
 }
 

@@ -535,7 +535,7 @@ fn a_kito_server_signs_people_in_with_it() {
     ok(&["plugin", "add", "--path", source.to_str().unwrap()]);
     let enabled = ok(&["plugin", "enable", "github"]);
     assert!(
-        enabled.contains("It may: read, sign_in, server_admin.")
+        enabled.contains("It may: read, write, sign_in, server_admin.")
             && enabled.contains("signing in with github"),
         "{enabled}"
     );
@@ -736,8 +736,8 @@ fn a_lane_whose_task_is_an_issue_tells_the_issue() {
     )
     .unwrap();
     ok(&["plugin", "add", "--path", source.to_str().unwrap()]);
-    // A repository gives it what is a repository's to give: reading.
-    assert!(ok(&["plugin", "enable", "github"]).contains("It may: read."));
+    // A repository gives it what is a repository's to give: reading, and tasks.
+    assert!(ok(&["plugin", "enable", "github"]).contains("It may: read, write."));
 
     // Not linked yet: said, and how.
     assert!(ok(&["github", "status"]).contains("Not linked to a repository at GitHub"));
@@ -897,6 +897,40 @@ fn a_lane_whose_task_is_an_issue_tells_the_issue() {
             .filter(|line| line.starts_with("POST "))
             .count(),
         2
+    );
+
+    // Kito's tasks (0.33): the open issue is a task, with what was said on it, once.
+    let synced = ok(&["github", "sync"]);
+    assert!(
+        synced.contains("task#1 is acme/shop#12: Prices lose half a cent")
+            && synced.contains("task#1: what ada said at GitHub"),
+        "{synced}"
+    );
+    let task: Value = serde_json::from_str(&ok(&["task", "show", "task#1", "--json"])).unwrap();
+    assert_eq!(task["source"]["number"], 12);
+    assert_eq!(
+        task["comments"][0]["text"],
+        "**ada** at GitHub: Keep amounts in cents."
+    );
+    assert!(ok(&["github", "sync"]).contains("nothing to bring"));
+
+    // What is said on the task here goes to the issue; closing it closes the issue.
+    ok(&[
+        "task", "comment", "task#1", "Rounded", "half", "to", "even.",
+    ]);
+    let told = asked(&github, comments, 3);
+    assert!(
+        told[2].contains("**Kito**: ada said on task#1:")
+            && told[2].contains("Rounded half to even."),
+        "{}",
+        told[2]
+    );
+    ok(&["task", "done", "task#1"]);
+    let closed = asked(&github, "PATCH /api/v3/repos/acme/shop/issues/12", 2);
+    assert!(
+        closed[1].contains("\"state_reason\":\"completed\""),
+        "{}",
+        closed[1]
     );
     kito(&["daemon", "stop"], None);
 }

@@ -1,13 +1,14 @@
 name = "github"
-version = "0.2.0"
+version = "0.3.0"
 description = "GitHub for Kito: sign in to a server, and issues as the tasks of lanes"
 api = 1
 # On a server it says who somebody is (`sign_in`), and adds `kito-server
 # github`, with which an administrator says which OAuth app is the
 # server's (`server_admin`). In a repository it reads what a lane is for
-# (`read`), to tell the issue the lane's task names; it changes nothing of
-# the repository.
-permissions = ["read", "sign_in", "server_admin"]
+# (`read`), to tell the issue the lane's task names; and makes Kito's
+# tasks of the issues, with what is said on them (`write`, Kito 0.33). It
+# changes no file of the repository.
+permissions = ["read", "write", "sign_in", "server_admin"]
 
 [sign_in]
 method = "github"
@@ -19,12 +20,13 @@ about = "Set up signing in with GitHub: setup <client id> | status"
 
 [[command]]
 name = "github"
-about = "Issues at GitHub as the tasks of lanes: link <owner>/<repository> | token --from <file> | status | issues | issue <number>"
+about = "Issues at GitHub as Kito's tasks: link <owner>/<repository> | token --from <file> | status | sync | issues | issue <number>"
 
 # A lane whose task is an issue: the issue is told when the lane is opened,
-# and told and closed when it is integrated.
+# and told and closed when it is integrated. A task made of an issue: what
+# is said on it, and its closing, dropping or reopening, go to the issue.
 [[event]]
-kinds = ["lane_opened", "integrated"]
+kinds = ["lane_opened", "integrated", "task_comment", "task_done", "task_changed"]
 
 [[tool]]
 name = "issues"
