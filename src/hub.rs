@@ -166,7 +166,7 @@ pub fn installation_token(installation: u64) -> Result<String, String> {
         }
     }
     let app = App::load()
-        .ok_or("this server has no GitHub App: an administrator makes one on the Plugins page")?;
+        .ok_or("this server has no GitHub App: an admin makes one on the Plugins page")?;
     let url = format!("{}/app/installations/{installation}/access_tokens", api());
     match github("POST", &url, &app.jwt()?, None)? {
         (201, answer) => {
@@ -571,7 +571,7 @@ fn new_app(asked: &Asked) -> Reply {
         return (
             403,
             "text/plain",
-            "for the server's administrators".to_owned(),
+            "for the server's admins".to_owned(),
             Vec::new(),
         );
     }
@@ -622,7 +622,7 @@ fn app_created(asked: &Asked) -> Reply {
         return (
             403,
             "text/plain",
-            "for the server's administrators".to_owned(),
+            "for the server's admins".to_owned(),
             Vec::new(),
         );
     }
@@ -707,6 +707,27 @@ fn maintains(asked: &Asked, repo: &str) -> bool {
         })
 }
 
+/// The server's app as the pages show it: what it is called, whose it
+/// is, and where it is installed on repositories.
+fn app_json(app: &App) -> Value {
+    json!({
+        "slug": app.slug, "owner": app.owner, "url": app.html_url,
+        "install": format!("{}/apps/{}/installations/new", host(), app.slug),
+    })
+}
+
+/// Whether the server has its app, for whoever is signed in, and whether
+/// they may make one: the page that makes it offers it once.
+fn app_info(asked: &Asked) -> Reply {
+    if !asked.headers.contains_key("x-kito-user") {
+        return json_reply(401, json!({ "error": "nobody is signed in" }));
+    }
+    json_reply(
+        200,
+        json!({ "app": App::load().as_ref().map(app_json), "may_create": admin(asked) }),
+    )
+}
+
 fn repo_api(asked: &Asked, repo: &str, what: &str) -> Reply {
     if !asked.headers.contains_key("x-kito-user") {
         return json_reply(401, json!({ "error": "nobody is signed in" }));
@@ -718,8 +739,7 @@ fn repo_api(asked: &Asked, repo: &str, what: &str) -> Reply {
             json_reply(
                 200,
                 json!({
-                    "app": app.as_ref().map(|app| json!({ "slug": app.slug, "owner": app.owner, "url": app.html_url,
-                        "install": format!("{}/apps/{}/installations/new", host(), app.slug) })),
+                    "app": app.as_ref().map(app_json),
                     "link": link.map(|link| json!({
                         "github": link.github, "code": link.code, "issues": link.issues, "branch": link.branch,
                         "last_ms": link.last_ms, "last_error": link.last_error, "said": link.said,
@@ -737,7 +757,7 @@ fn repo_api(asked: &Asked, repo: &str, what: &str) -> Reply {
         },
         ("POST", _) if !maintains(asked, repo) => json_reply(
             403,
-            json!({ "error": "only a maintainer of this repository, or an administrator, links it" }),
+            json!({ "error": "only a maintainer of this repository, or an admin, links it" }),
         ),
         ("POST", "link") => {
             let said: Value = serde_json::from_slice(&asked.body).unwrap_or(Value::Null);
@@ -863,6 +883,7 @@ fn answer(asked: &Asked) -> Reply {
     let path = asked.path.trim_start_matches("/github");
     match (asked.method.as_str(), path) {
         ("POST", "/webhook") => webhook(asked),
+        ("GET", "/app") => app_info(asked),
         ("GET", "/app/new") => new_app(asked),
         ("GET", "/app/created") => app_created(asked),
         ("GET", "/app/installed") => redirect("/#/admin"),

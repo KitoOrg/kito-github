@@ -12,6 +12,9 @@
 //!   which sends the browser back to the server.
 //! - `kito-github sign-in finish`: who that was, `{"wait": seconds}`
 //!   while they have not done it, or `{"refused": why}`.
+//! - `kito-github sign-in ready`: whether it is set up
+//!   (`{"ready": true}`, or `false` with `why`): the server asks before
+//!   it offers it (Kito 0.39.1).
 //! - `kito-github sign-in lookup <login>`: who a login is, for
 //!   `kito-server user add --identity github:<login>`.
 //!
@@ -115,9 +118,11 @@ impl Config {
 
     fn client_id(&self) -> Result<&str, String> {
         match self.client_id.trim() {
-            "" => Err("signing in with GitHub is not set up on this server: an administrator runs `kito-server \
+            "" => Err(
+                "signing in with GitHub is not set up on this server: an admin runs `kito-server \
                        github setup <client id>` with the OAuth app's"
-                .to_owned()),
+                    .to_owned(),
+            ),
             id => Ok(id),
         }
     }
@@ -197,15 +202,15 @@ fn no_token(answer: &Value) -> Value {
         "access_denied" => refused("it was refused at GitHub"),
         "expired_token" => refused("the code ran out before it was entered: start again"),
         "device_flow_disabled" => refused(
-            "the OAuth app does not let a code be entered: an administrator enables `Device Flow` in the app's \
+            "the OAuth app does not let a code be entered: an admin enables `Device Flow` in the app's \
              settings at GitHub",
         ),
         "incorrect_client_credentials" => {
-            refused("GitHub does not know this server's OAuth app: an administrator checks its client id and secret")
+            refused("GitHub does not know this server's OAuth app: an admin checks its client id and secret")
         }
         "bad_verification_code" => refused("GitHub no longer takes that code: start again"),
         "redirect_uri_mismatch" => refused(
-            "the OAuth app sends people back to another address than this server's: an administrator sets its \
+            "the OAuth app sends people back to another address than this server's: an admin sets its \
              callback to <the server's address>/-/sign-in/github/callback",
         ),
         "" => refused("GitHub gave no answer that says who signed in"),
@@ -232,6 +237,30 @@ fn escaped(text: &str) -> String {
     out
 }
 
+/// Whether signing in with GitHub can be used, as the server asks before
+/// it offers it (Kito 0.39.1): the app is known, and for a browser its
+/// secret too.
+fn ready(config: &Config, told: &Value) -> Value {
+    let no_secret = config
+        .client_secret
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty();
+    let why = match config.client_id() {
+        Err(why) => Some(why),
+        Ok(_) if told["kind"] == "browser" && no_secret => Some(
+            "signing in with a browser is not set up on this server: an admin creates the server's GitHub App, \
+             or runs `kito-server github setup <client id> --secret-from <file>`"
+                .to_owned(),
+        ),
+        Ok(_) => None,
+    };
+    match why {
+        Some(why) => json!({ "ready": false, "why": why }),
+        None => json!({ "ready": true }),
+    }
+}
+
 fn begin(config: &Config, told: &Value) -> Result<Value, String> {
     let client_id = config.client_id()?;
     if told["kind"] == "browser" {
@@ -245,7 +274,7 @@ fn begin(config: &Config, told: &Value) -> Result<Value, String> {
             .is_empty()
         {
             return Ok(refused(
-                "signing in with a browser is not set up on this server: an administrator runs `kito-server github \
+                "signing in with a browser is not set up on this server: an admin runs `kito-server github \
                  setup <client id> --secret-from <file>`",
             ));
         }
@@ -279,7 +308,7 @@ fn begin(config: &Config, told: &Value) -> Result<Value, String> {
         _ if answer["error"].is_string() => Ok(no_token(&answer)),
         // GitHub answers a client id it does not know with a page.
         _ => Ok(refused(format!(
-            "GitHub gave no code to enter (status {status}): an administrator checks the OAuth app's client id, \
+            "GitHub gave no code to enter (status {status}): an admin checks the OAuth app's client id, \
              and that `Device Flow` is enabled for it"
         ))),
     }
@@ -441,8 +470,9 @@ fn main() -> ExitCode {
             let answer = Config::load().and_then(|config| match (*step, rest) {
                 ("begin", _) => begin(&config, &told),
                 ("finish", _) => finish(&config, &told),
+                ("ready", _) => Ok(ready(&config, &told)),
                 ("lookup", [login, ..]) => lookup(&config, login),
-                _ => Err("it is `sign-in begin | finish | lookup <login>`".to_owned()),
+                _ => Err("it is `sign-in begin | finish | ready | lookup <login>`".to_owned()),
             });
             answer.map(|answer| println!("{answer}"))
         }

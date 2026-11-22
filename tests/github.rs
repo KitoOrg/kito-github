@@ -251,7 +251,32 @@ fn a_code_entered_at_github_says_who_signs_in_from_a_command_line() {
         "{why}"
     );
 
+    // The server asks before it offers it: not yet.
+    let asked = answer(
+        tmp.path(),
+        &["sign-in", "ready"],
+        &json!({ "kind": "browser" }),
+    );
+    assert_eq!(asked["ready"], false, "{asked}");
+    assert!(
+        asked["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("not set up on this server")),
+        "{asked}"
+    );
+
     set_up(tmp.path(), &github, false);
+    // The app is known, without its secret: a code can be entered, a browser cannot come back.
+    let device = json!({ "kind": "device" });
+    assert_eq!(
+        answer(tmp.path(), &["sign-in", "ready"], &device),
+        json!({ "ready": true })
+    );
+    let browser = json!({ "kind": "browser" });
+    assert_eq!(
+        answer(tmp.path(), &["sign-in", "ready"], &browser)["ready"],
+        false
+    );
     let begun = answer(
         tmp.path(),
         &["sign-in", "begin"],
@@ -1167,6 +1192,15 @@ fn a_server_keeps_a_repository_in_step_with_github() {
         answer
     };
 
+    // Before there is one, the page that makes it is told so.
+    let (status, _, said) = page("/github/app");
+    assert_eq!(status, 200, "{said}");
+    let said: Value = serde_json::from_str(&said).unwrap();
+    assert!(
+        said["app"].is_null() && said["may_create"] == true,
+        "{said}"
+    );
+
     // An administrator makes the server's app: a page that goes on to
     // GitHub with the manifest; GitHub sends them back with a code.
     let (status, _, form) = page("/github/app/new?org=acme");
@@ -1195,6 +1229,18 @@ fn a_server_keeps_a_repository_in_step_with_github() {
     assert!(dir.join("plugins/github/app.pem").is_file());
     // Nobody signed in makes nothing.
     assert_eq!(http(&address, "GET", "/github/app/new", &[], "").0, 403);
+    // And the server has its app, said to whoever is signed in.
+    let (status, _, said) = page("/github/app");
+    assert_eq!(status, 200, "{said}");
+    let said: Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(said["app"]["slug"], "kito-test", "{said}");
+    assert!(
+        said["app"]["install"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/apps/kito-test/installations/new")),
+        "{said}"
+    );
+    assert_eq!(http(&address, "GET", "/github/app", &[], "").0, 401);
 
     // A maintainer picks the repository at GitHub among those the app reaches, and links it.
     let (status, _, choices) = page("/github/api/shop/choices");
