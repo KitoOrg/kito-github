@@ -20,6 +20,7 @@
 //! `kito-server github setup` writes. The token GitHub gives it is used
 //! once, to ask who it is for, and kept nowhere.
 
+mod hub;
 mod issues;
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,10 @@ struct Config {
     /// Its API, when it is not where it usually is for that host.
     #[serde(skip_serializing_if = "Option::is_none")]
     api: Option<String>,
+    /// Where the repositories' git is, when it is not at the host: a
+    /// mirror, or a directory (`<git>/<owner>/<name>.git`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git: Option<String>,
 }
 
 impl Config {
@@ -447,6 +452,10 @@ fn main() -> ExitCode {
         // and `kito github …` for a person (a repository's command is not
         // given its name).
         ["event"] => issues::event(),
+        // On a server (Kito 0.39): the pages, the webhook, and keeping the
+        // linked repositories in step; and git asking for a token.
+        ["serve-pages"] => hub::serve(),
+        ["git-credential", ..] => hub::git_credential(&words[1..]),
         ["tool", name] => {
             println!("{}", issues::tool(name));
             Ok(())

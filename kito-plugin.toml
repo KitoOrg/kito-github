@@ -1,6 +1,6 @@
 name = "github"
-version = "0.3.0"
-description = "GitHub for Kito: sign in to a server, and issues as the tasks of lanes"
+version = "0.4.0"
+description = "GitHub for Kito: sign in, keep a repository in step with one at GitHub, and its issues as tasks"
 api = 1
 # On a server it says who somebody is (`sign_in`), and adds `kito-server
 # github`, with which an administrator says which OAuth app is the
@@ -8,7 +8,15 @@ api = 1
 # (`read`), to tell the issue the lane's task names; and makes Kito's
 # tasks of the issues, with what is said on them (`write`, Kito 0.33). It
 # changes no file of the repository.
-permissions = ["read", "write", "sign_in", "server_admin"]
+permissions = ["read", "write", "integrate", "admin", "sign_in", "pages", "server_admin"]
+
+# On a server (Kito 0.39): pages under /github, where an administrator
+# makes the server's GitHub App and GitHub sends its webhooks; and, as the
+# plugin itself (ADR 0020 of Kito), a repository linked to one at GitHub
+# kept in step: its code pulled and pushed (`integrate` to bring GitHub's
+# commits in, `admin` to make GitHub its git remote), its issues as tasks.
+[pages]
+mount = "/github"
 
 [sign_in]
 method = "github"

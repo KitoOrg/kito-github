@@ -22,6 +22,8 @@ struct Fake {
     slow: bool,
     /// `METHOD path | authorization | body`, one for each request.
     seen: Vec<String>,
+    /// The key of the GitHub App it makes.
+    pem: String,
 }
 
 struct GitHub {
@@ -126,8 +128,32 @@ impl GitHub {
                     ("GET", "/api/v3/repos/acme/shop/issues/12/comments?per_page=5") => {
                         (200, json!([{ "user": { "login": "ada" }, "body": "Keep amounts in cents." }]).to_string())
                     }
+                    // The GitHub App of a server (kito-github 0.4).
+                    ("POST", "/api/v3/app-manifests/abc/conversions") => (
+                        201,
+                        json!({
+                            "id": 7, "slug": "kito-test", "owner": { "login": "acme" },
+                            "html_url": format!("{site}/apps/kito-test"), "webhook_secret": "whsec",
+                            "pem": fake.pem, "client_id": "app-1", "client_secret": "shh",
+                        })
+                        .to_string(),
+                    ),
+                    ("GET", "/api/v3/repos/acme/shop/installation") if authorization.starts_with("Bearer ey") => {
+                        (200, r#"{"id":77}"#.to_owned())
+                    }
+                    ("POST", "/api/v3/app/installations/77/access_tokens") if authorization.starts_with("Bearer ey") => {
+                        (201, r#"{"token":"ghs_inst"}"#.to_owned())
+                    }
+                    ("GET", "/api/v3/app/installations") if authorization.starts_with("Bearer ey") => {
+                        (200, r#"[{"id":77}]"#.to_owned())
+                    }
+                    ("GET", "/api/v3/installation/repositories?per_page=100&page=1") if authorization == "Bearer ghs_inst" => (
+                        200,
+                        json!({ "repositories": [{ "full_name": "acme/shop", "private": true, "default_branch": "main" }] })
+                            .to_string(),
+                    ),
                     ("POST", "/api/v3/repos/acme/shop/issues/12/comments") | ("PATCH", "/api/v3/repos/acme/shop/issues/12")
-                        if authorization == "Bearer ghp_repo" =>
+                        if authorization == "Bearer ghp_repo" || authorization == "Bearer ghs_inst" =>
                     {
                         (201, "{}".to_owned())
                     }
@@ -535,7 +561,7 @@ fn a_kito_server_signs_people_in_with_it() {
     ok(&["plugin", "add", "--path", source.to_str().unwrap()]);
     let enabled = ok(&["plugin", "enable", "github"]);
     assert!(
-        enabled.contains("It may: read, write, sign_in, server_admin.")
+        enabled.contains("It may: read, write, integrate, admin, sign_in, pages, server_admin.")
             && enabled.contains("signing in with github"),
         "{enabled}"
     );
@@ -737,7 +763,7 @@ fn a_lane_whose_task_is_an_issue_tells_the_issue() {
     .unwrap();
     ok(&["plugin", "add", "--path", source.to_str().unwrap()]);
     // A repository gives it what is a repository's to give: reading, and tasks.
-    assert!(ok(&["plugin", "enable", "github"]).contains("It may: read, write."));
+    assert!(ok(&["plugin", "enable", "github"]).contains("It may: read, write, integrate, admin."));
 
     // Not linked yet: said, and how.
     assert!(ok(&["github", "status"]).contains("Not linked to a repository at GitHub"));
@@ -933,4 +959,375 @@ fn a_lane_whose_task_is_an_issue_tells_the_issue() {
         closed[1]
     );
     kito(&["daemon", "stop"], None);
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Carol")
+        .env("GIT_AUTHOR_EMAIL", "carol@example.com")
+        .env("GIT_COMMITTER_NAME", "Carol")
+        .env("GIT_COMMITTER_EMAIL", "carol@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// An HTTP request to the server: status, head, body.
+fn http(
+    address: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String, String) {
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    let mut text = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        text.push_str(&format!("{name}: {value}\r\n"));
+    }
+    text.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+    stream.write_all(text.as_bytes()).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
+    let status = head
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    (status, head.to_owned(), body.to_owned())
+}
+
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..600 {
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{what} never came");
+}
+
+#[test]
+fn a_server_keeps_a_repository_in_step_with_github() {
+    use hmac::Mac;
+    let bin = kito_bin();
+    let exe = |name: &str| bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let (dir, config) = (base.join("server"), base.join("config"));
+    let github = GitHub::start();
+    // The app's key, as GitHub makes it.
+    let pem = Command::new("openssl")
+        .args(["genrsa", "2048"])
+        .output()
+        .unwrap();
+    github.fake.lock().unwrap().pem = String::from_utf8_lossy(&pem.stdout).into_owned();
+    let server = |args: &[&str]| {
+        let mut command = Command::new(exe("kito-server"));
+        command
+            .arg("--dir")
+            .arg(&dir)
+            .args(args)
+            .env("KITOD_BIN", exe("kitod"))
+            .env("KITO_AUTHOR", "the server")
+            .env("KITO_CONFIG_DIR", &config)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command
+    };
+    let ok = |args: &[&str]| {
+        let out = server(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "kito-server {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    // "GitHub": acme/shop, a git repository on disk where the plugin is
+    // told the repositories' git is.
+    let source = base.join("shop-src");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(source.join("src/shop.ts"), "export const price = 1;\n").unwrap();
+    git_in(&source, &["init", "-q", "-b", "main"]);
+    git_in(&source, &["add", "-A"]);
+    git_in(&source, &["commit", "-q", "-m", "start"]);
+    let remotes = base.join("remotes");
+    std::fs::create_dir_all(remotes.join("acme")).unwrap();
+    let remote = remotes.join("acme/shop.git");
+    git_in(
+        &base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            source.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+
+    let plugin_dir = base.join("kito-github");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    let program = format!("kito-github{}", std::env::consts::EXE_SUFFIX);
+    std::fs::copy(env!("CARGO_BIN_EXE_kito-github"), plugin_dir.join(&program)).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("kito-plugin.toml"),
+        plugin_dir.join("kito-plugin.toml"),
+    )
+    .unwrap();
+    ok(&["init", dir.to_str().unwrap()]);
+    ok(&["repo", "add", "shop", "--from", source.to_str().unwrap()]);
+    let token = ok(&["user", "add", "ada", "--role", "admin"]);
+    let token = token
+        .lines()
+        .find(|line| line.starts_with("kito_"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    ok(&["plugin", "add", "--path", plugin_dir.to_str().unwrap()]);
+    ok(&["plugin", "enable", "github"]);
+    std::fs::create_dir_all(dir.join("plugins/github")).unwrap();
+    std::fs::write(
+        dir.join("plugins/github/config.toml"),
+        format!(
+            "client_id = \"\"\nhost = \"{}\"\ngit = \"{}\"\n",
+            github.host,
+            remotes.display()
+        ),
+    )
+    .unwrap();
+
+    struct Serving(std::process::Child);
+    impl Drop for Serving {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serving = Serving(
+        server(&[
+            "serve",
+            "--plain",
+            "--listen",
+            "127.0.0.1:0",
+            "--http",
+            "127.0.0.1:0",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap(),
+    );
+    let mut first = String::new();
+    BufReader::new(serving.0.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let address = first
+        .trim()
+        .strip_prefix("kito-server: http://")
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .to_owned();
+    let opened = http(
+        &address,
+        "POST",
+        "/-/session",
+        &[("Content-Type", "application/json")],
+        &json!({ "token": token }).to_string(),
+    );
+    let cookie = opened
+        .1
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("set-cookie: kito_session=")
+                .then(|| line[12..].split(';').next().unwrap().to_owned())
+        })
+        .expect(&opened.1);
+    let page = |path: &str| {
+        let mut answer = (502, String::new(), String::new());
+        for _ in 0..200 {
+            answer = http(&address, "GET", path, &[("Cookie", &cookie)], "");
+            if answer.0 != 502 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        answer
+    };
+
+    // An administrator makes the server's app: a page that goes on to
+    // GitHub with the manifest; GitHub sends them back with a code.
+    let (status, _, form) = page("/github/app/new?org=acme");
+    assert_eq!(status, 200, "{form}");
+    assert!(
+        form.contains("/organizations/acme/settings/apps/new?state="),
+        "{form}"
+    );
+    assert!(
+        form.contains("github/webhook") && form.contains("&quot;issues&quot;:&quot;write&quot;"),
+        "{form}"
+    );
+    let state = form
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_owned();
+    let (status, head, _) = page("/github/app/created?code=abc&state=bad");
+    assert_eq!(status, 400, "{head}");
+    let (status, head, _) = page(&format!("/github/app/created?code=abc&state={state}"));
+    assert_eq!(status, 302, "{head}");
+    assert!(head.contains("/apps/kito-test/installations/new"), "{head}");
+    assert!(dir.join("plugins/github/app.pem").is_file());
+    // Nobody signed in makes nothing.
+    assert_eq!(http(&address, "GET", "/github/app/new", &[], "").0, 403);
+
+    // A maintainer picks the repository at GitHub among those the app reaches, and links it.
+    let (status, _, choices) = page("/github/api/shop/choices");
+    assert_eq!(status, 200, "{choices}");
+    assert!(choices.contains("acme/shop"), "{choices}");
+    let link = json!({ "github": "acme/shop", "branch": "main", "code": true, "issues": true })
+        .to_string();
+    let (status, _, linked) = http(
+        &address,
+        "POST",
+        "/github/api/shop/link",
+        &[("Cookie", &cookie)],
+        &link,
+    );
+    assert_eq!(status, 200, "{linked}");
+
+    // Issues come in as tasks; the repository's git remote is GitHub.
+    let ask = |method: &str| {
+        let call = json!({ "method": method, "params": {} }).to_string();
+        let bearer = format!("Bearer {token}");
+        let (_, _, body) = http(
+            &address,
+            "POST",
+            "/-/api/shop",
+            &[
+                ("Authorization", &bearer),
+                ("Content-Type", "application/json"),
+            ],
+            &call,
+        );
+        serde_json::from_str::<Value>(&body).unwrap_or(Value::Null)
+    };
+    wait_for("the issue as a task", || {
+        ask("tasks").to_string().contains("Prices lose half a cent")
+    });
+    let status = ask("status");
+    assert_eq!(
+        status["repo"]["push"].as_str(),
+        Some(remote.to_str().unwrap()),
+        "{status}"
+    );
+
+    // Somebody pushes at GitHub; GitHub's webhook, signed, says so: it comes in.
+    let other = base.join("other");
+    git_in(
+        &base,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(other.join("NOTES.md"), "from GitHub\n").unwrap();
+    git_in(&other, &["add", "-A"]);
+    git_in(&other, &["commit", "-q", "-m", "notes at GitHub"]);
+    git_in(&other, &["push", "-q", "origin", "main"]);
+    let body =
+        json!({ "ref": "refs/heads/main", "repository": { "full_name": "acme/shop" } }).to_string();
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"whsec").unwrap();
+    mac.update(body.as_bytes());
+    let signature: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let signature = format!("sha256={signature}");
+    let wrong = http(
+        &address,
+        "POST",
+        "/github/webhook",
+        &[
+            ("x-github-event", "push"),
+            ("x-hub-signature-256", "sha256=00"),
+        ],
+        &body,
+    );
+    assert_eq!(wrong.0, 401);
+    let told = http(
+        &address,
+        "POST",
+        "/github/webhook",
+        &[
+            ("x-github-event", "push"),
+            ("x-hub-signature-256", &signature),
+        ],
+        &body,
+    );
+    assert_eq!(told.0, 202, "{}", told.2);
+    wait_for("GitHub's commit on the main lane", || {
+        std::fs::read_to_string(dir.join("repos/shop/NOTES.md"))
+            .is_ok_and(|text| text == "from GitHub\n")
+    });
+    // And what Kito has is at GitHub: the merge was pushed.
+    wait_for("the push to GitHub", || {
+        git_in(&remote, &["log", "--format=%s", "-3", "main"]).contains("notes at GitHub")
+            && ask("status")["repo"]["pushed"].is_string()
+    });
+    let (status, _, said) = page("/github/api/shop/status");
+    assert_eq!(status, 200, "{said}");
+    let said: Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(said["link"]["github"], "acme/shop", "{said}");
+    assert_eq!(said["may_change"], true);
+    // No token is written in the repository: git asks the plugin.
+    let kept = std::fs::read_to_string(dir.join("repos/shop/.git/config")).unwrap();
+    assert!(
+        kept.contains("git-credential") && !kept.contains("ghs_inst"),
+        "{kept}"
+    );
+    let mut asked = Command::new(env!("CARGO_BIN_EXE_kito-github"))
+        .args(["git-credential", "--server", dir.to_str().unwrap(), "get"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    asked
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"protocol=https
+host=github.com
+path=acme/shop.git
+
+",
+        )
+        .unwrap();
+    let given = String::from_utf8_lossy(&asked.wait_with_output().unwrap().stdout).into_owned();
+    assert_eq!(
+        given,
+        "username=x-access-token
+password=ghs_inst
+"
+    );
 }

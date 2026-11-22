@@ -1,7 +1,10 @@
 # kito-github
 
-GitHub for [Kito](https://github.com/KitoOrg/kito), as a plugin. Two
+GitHub for [Kito](https://github.com/KitoOrg/kito), as a plugin. Three
 things, each on its own:
+
+- **On a team's server, a repository kept in step with one at GitHub**
+  (Kito 0.39): its code both ways, and its issues as tasks. Below.
 
 - **In a repository**: the issues at GitHub are the tasks of lanes. An
   agent reads an issue, opens its lane for it, and the issue is told,
@@ -9,6 +12,34 @@ things, each on its own:
 - **On a team's server**: signing in with GitHub. It says who somebody
   is, and nothing else: who may use which repository, and what they may
   do there, stays the server's (`kito-server user add … --role …`).
+
+## A repository kept in step with GitHub (on a server)
+
+1. Enable it on the server, with pages: `kito-server plugin add github`,
+   `kito-server plugin enable github`.
+2. On the web client's **Plugins** page, an administrator clicks **Create
+   GitHub App** (for an organization, its name): GitHub makes the
+   server's app, with the right permissions and its webhook, and the
+   server keeps its key. Install the app on the repositories to sync.
+3. In a repository's **Settings → Plugins → GitHub**, a maintainer picks
+   the repository at GitHub, the branch the main lane is, and whether
+   code, issues or both follow.
+
+Then:
+
+- **Code, both ways**: every integration is pushed to GitHub, with the
+  permanent lanes' branches; commits pushed or merged at GitHub come in
+  through a lane, merged function by function and checked like any lane,
+  then the merge is pushed. A real conflict waits in Kito for a decision.
+- **Issues and tasks**: every open issue is a task, with what is said on
+  it; a task done or dropped closes its issue, an issue closed closes its
+  task; a lane of an issue's task is said on the issue.
+- **When**: GitHub's webhook tells the server at once; the server also
+  checks every five minutes, for when GitHub cannot reach it. **Sync
+  now** in the settings does it at once.
+- **No token in the repository**: git asks this plugin for one when it
+  needs it (`kito-github git-credential`), an hour-long token of the
+  app's installation.
 
 ## Issues as the tasks of lanes
 

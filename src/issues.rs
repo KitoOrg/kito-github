@@ -36,6 +36,33 @@ struct Linked {
     close: Option<bool>,
 }
 
+/// On a server (Kito 0.39), the repository worked on, the repository at
+/// GitHub, and the GitHub App's token for it: what is otherwise the
+/// environment of a repository's plugin and its own token.
+#[derive(Clone)]
+pub struct OnServer {
+    pub kito: String,
+    pub github: String,
+    pub api: String,
+    pub token: String,
+}
+
+thread_local! {
+    static ON_SERVER: std::cell::RefCell<Option<OnServer>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `work` for a repository of the server, as the plugin of the server.
+pub fn on_server<T>(context: OnServer, work: impl FnOnce() -> T) -> T {
+    ON_SERVER.with(|now| *now.borrow_mut() = Some(context));
+    let done = work();
+    ON_SERVER.with(|now| *now.borrow_mut() = None);
+    done
+}
+
+fn server_context() -> Option<OnServer> {
+    ON_SERVER.with(|now| now.borrow().clone())
+}
+
 fn said(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -54,6 +81,13 @@ fn own_dir() -> Result<PathBuf, String> {
 
 impl Linked {
     fn load() -> Result<Linked, String> {
+        if let Some(context) = server_context() {
+            return Ok(Linked {
+                repo: context.github,
+                api: Some(context.api),
+                close: None,
+            });
+        }
         let path = own_dir()?.join("config.toml");
         match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
@@ -88,6 +122,9 @@ impl Linked {
 /// The token GitHub knows this repository by: the one it was given, or
 /// the one in the environment of whoever runs this.
 fn token() -> Option<String> {
+    if let Some(context) = server_context() {
+        return Some(context.token);
+    }
     let kept = own_dir()
         .ok()
         .and_then(|dir| std::fs::read_to_string(dir.join("token")).ok());
@@ -263,6 +300,9 @@ impl<T: Read + Write> Wire for T {}
 /// Asks the repository's daemon one thing, with the plugin's own key
 /// (Kito's `docs/api.md`).
 fn daemon(method: &str, params: Value) -> Result<Value, String> {
+    if let Some(context) = server_context() {
+        return crate::hub::kito(&context.kito, method, params);
+    }
     let (Some(socket), Some(key)) = (said("KITO_SOCKET"), said("KITO_PLUGIN_KEY")) else {
         return Err("the repository's daemon is not known: this is run by Kito".to_owned());
     };
@@ -302,6 +342,13 @@ fn daemon(method: &str, params: Value) -> Result<Value, String> {
 /// issue is told, and closed when its work is in.
 pub fn event() -> Result<(), String> {
     let event: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(Value::Null);
+    handle_event(&event)
+}
+
+/// What an event of the repository means at GitHub: a lane of an issue
+/// opened or integrated, a task of an issue commented on, done, dropped.
+pub fn handle_event(event: &Value) -> Result<(), String> {
+    let event = event.clone();
     let kind = event["kind"].as_str().unwrap_or_default();
     if kind.starts_with("task_") {
         return task_event(kind, &event);
@@ -485,6 +532,11 @@ fn task_event(kind: &str, event: &Value) -> Result<(), String> {
 /// `kito github sync`: each open issue is a task of Kito, with what was
 /// said on it; a task whose issue was closed at GitHub is closed or
 /// dropped as it was. Answers what it did.
+/// The issues of the repository at GitHub as tasks, now: on a server.
+pub fn sync_here() -> Result<Vec<String>, String> {
+    sync(&Linked::load()?)
+}
+
 fn sync(linked: &Linked) -> Result<Vec<String>, String> {
     let repo = linked.repo()?.to_owned();
     let tasks = daemon("tasks", json!({ "state": "all" }))?;
